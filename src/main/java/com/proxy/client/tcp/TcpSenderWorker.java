@@ -8,10 +8,9 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.stereotype.Component;
 
-import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.PrintWriter;
-import java.io.StringReader;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 
 @Component
 public class TcpSenderWorker implements Runnable {
@@ -38,60 +37,87 @@ public class TcpSenderWorker implements Runnable {
                 HttpServletRequest req = (HttpServletRequest) asyncContext.getRequest();
                 HttpServletResponse res = (HttpServletResponse) asyncContext.getResponse();
 
-                // Serialize the request
+                // Send the request
                 String payload = req.getMethod() + " " + req.getRequestURI() + " HTTP/1.1\r\nHost: " + req.getHeader("host") + "\r\n\r\n";
                 connectionManager.send(payload);
 
-                // Read response
-                String serverResponse = connectionManager.receive();
-                System.out.println("[proxy-client] Received response:\n" + serverResponse);
-
+                // Get response
+                byte[] responseBytes = connectionManager.receiveRaw();
+                System.out.println("[proxy-client] Received response");
 
                 // Send response back to original client
-                writeResponseToClient(serverResponse,res);
+                writeParsedResponseToClient(responseBytes,res);
                 asyncContext.complete();
+                System.out.println("[proxy-client] Response sent to actual client");
+
             } catch (Exception e) {
-                e.printStackTrace(); // log error for debugging
+                e.printStackTrace();
             }
         }
     }
 
-    private void writeResponseToClient(String rawResponse, HttpServletResponse res) throws IOException {
-        BufferedReader reader = new BufferedReader(new StringReader(rawResponse));
-        String statusLine = reader.readLine(); // e.g., HTTP/1.1 200 OK
-
-        int statusCode = 200; // fallback
-        if (statusLine != null && statusLine.startsWith("HTTP/1.1")) {
-            String[] parts = statusLine.split(" ");
-            if (parts.length >= 2) {
-                try {
-                    statusCode = Integer.parseInt(parts[1]);
-                } catch (NumberFormatException ignored) {}
+    public void writeParsedResponseToClient(byte[] rawResponseBytes, HttpServletResponse res) throws IOException {
+        int headerBodySeparatorIndex = -1;
+        // Search for the first occurrence of \r\n\r\n (CRLF CRLF)
+        for (int i = 0; i < rawResponseBytes.length - 3; i++) {
+            if (rawResponseBytes[i] == 0x0D && rawResponseBytes[i + 1] == 0x0A && // CR LF
+                    rawResponseBytes[i + 2] == 0x0D && rawResponseBytes[i + 3] == 0x0A) { // CR LF
+                headerBodySeparatorIndex = i;
+                break;
             }
         }
 
-        // Read headers
-        String line;
-        while ((line = reader.readLine()) != null && !line.isEmpty()) {
-            int colonIndex = line.indexOf(":");
-            if (colonIndex > 0) {
-                String headerName = line.substring(0, colonIndex).trim();
-                String headerValue = line.substring(colonIndex + 1).trim();
-                res.setHeader(headerName, headerValue);
+        if (headerBodySeparatorIndex == -1) {
+            // If no proper separator is found, handle as an error or unexpected format.
+            res.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
+            res.getWriter().write("Error: Raw response bytes do not contain a valid HTTP header-body separator.");
+            return;
+        }
+
+        // 1. Extract the raw header string
+        String rawHeaders = new String(rawResponseBytes, 0, headerBodySeparatorIndex, StandardCharsets.ISO_8859_1);
+        String[] headerLines = rawHeaders.split("\r\n");
+
+        int statusCode = HttpServletResponse.SC_OK; // Default status code
+        String contentType = "application/octet-stream"; // Default content type
+
+        // Parse Status Line and Headers from the extracted header string
+        if (headerLines.length > 0) {
+            // Parse Status Line (e.g., "HTTP/1.1 200 OK")
+            String statusLine = headerLines[0];
+            if (statusLine.startsWith("HTTP/")) {
+                String[] statusParts = statusLine.split(" ");
+                if (statusParts.length > 1) {
+                    try {
+                        statusCode = Integer.parseInt(statusParts[1]);
+                    } catch (NumberFormatException e) {
+                        // status code is not a valid number
+                        System.err.println("Warning: Could not parse status code from: " + statusLine);
+                    }
+                }
+            }
+
+            // Parse other relevant headers
+            for (int i = 1; i < headerLines.length; i++) {
+                String line = headerLines[i];
+                if (line.toLowerCase().startsWith("content-type:")) {
+                    contentType = line.substring("content-type:".length()).trim();
+                }
             }
         }
 
-        // Read body
-        StringBuilder bodyBuilder = new StringBuilder();
-        while ((line = reader.readLine()) != null) {
-            bodyBuilder.append(line).append("\n");
-        }
+        // Extract the actual HTML body bytes
+        byte[] htmlBodyBytes = new byte[rawResponseBytes.length - (headerBodySeparatorIndex + 4)];
+        System.arraycopy(rawResponseBytes, headerBodySeparatorIndex + 4, htmlBodyBytes, 0, htmlBodyBytes.length);
 
+        // Build response
         res.setStatus(statusCode);
-        res.getWriter().write(bodyBuilder.toString());
-        res.getWriter().flush();
+        res.setHeader("Content-Type", contentType);
+        res.setContentLength(htmlBodyBytes.length);
 
-
+        // Write only the HTML body to the client's output stream
+        OutputStream out = res.getOutputStream();
+        out.write(htmlBodyBytes);
+        out.flush();
     }
-
 }

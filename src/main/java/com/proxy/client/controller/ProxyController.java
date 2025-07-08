@@ -21,8 +21,8 @@ public class ProxyController {
     public void proxy(HttpServletRequest request, HttpServletResponse response) throws Exception {
         // Enable async processing
         AsyncContext asyncContext = request.startAsync();
-        asyncContext.setTimeout(0); // disable timeout; we’ll manage it manually
-
+        asyncContext.setTimeout(0); // disable timeout, since it is managed manually
+        System.out.println("Received request:" + request.getMethod() + " " + request.getRequestURL());
         queueManager.enqueue(new QueuedHttpRequest(asyncContext));
     }
 }

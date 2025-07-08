@@ -10,8 +10,8 @@ import java.net.Socket;
 @Component
 public class TcpConnectionManager {
     private Socket socket;
-    private BufferedWriter out;
-    private BufferedReader in;
+    private OutputStream out;
+    private InputStream in;
 
     @Value("${proxy.server.host}")
     private String serverHost;
@@ -23,46 +23,33 @@ public class TcpConnectionManager {
     public void connectToServer() {
         try {
             socket = new Socket(serverHost, serverPort);
-            System.out.println("[proxy-client] Connected to proxy-server at " + serverHost + ":" + serverPort);
 
-            // Just prepare the streams, don't send anything yet
-            out = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream()));
-            in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+            // Preparing the streams
+            out = socket.getOutputStream();
+            in = socket.getInputStream();
+            System.out.println("[proxy-client] Connected to proxy-server at " + serverHost + ":" + serverPort);
         } catch (IOException e) {
             throw new RuntimeException("Could not connect to offshore proxy-server", e);
         }
     }
 
     public synchronized void send(String request) throws IOException {
-        out.write(request);
+        out.write(request.getBytes());
         out.flush();
     }
 
-    public synchronized String receive() throws IOException {
-        StringBuilder response = new StringBuilder();
-        String line;
+    public synchronized byte[] receiveRaw() throws IOException {
+        InputStream input = socket.getInputStream();
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
 
-        // Read response headers
-        int contentLength = 0;
-        while ((line = in.readLine()) != null && !line.isEmpty()) {
-            response.append(line).append("\r\n");
+        byte[] temp = new byte[8192];
+        int bytesRead;
 
-            // Try to extract Content-Length
-            if (line.toLowerCase().startsWith("content-length:")) {
-                contentLength = Integer.parseInt(line.split(":")[1].trim());
-            }
+        while ((bytesRead = input.read(temp)) != -1) {
+            buffer.write(temp, 0, bytesRead);
+            if (input.available() == 0) break;
         }
 
-        response.append("\r\n");
-
-        // Read response body if Content-Length is known
-        if (contentLength > 0) {
-            char[] buffer = new char[contentLength];
-            int read = in.read(buffer, 0, contentLength);
-            response.append(buffer, 0, read);
-        }
-
-        return response.toString();
+        return buffer.toByteArray();
     }
-
 }
