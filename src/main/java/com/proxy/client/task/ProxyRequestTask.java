@@ -1,11 +1,13 @@
 package com.proxy.client.task;
 
 import com.proxy.client.enums.RequestType;
+import lombok.Getter;
 
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.concurrent.CompletableFuture;
 
+@Getter
 public class ProxyRequestTask {
 
     public final RequestType type;
