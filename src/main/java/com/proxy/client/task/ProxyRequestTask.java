@@ -36,7 +36,6 @@ public class ProxyRequestTask {
         this.rawHttpRequestBytes = null; // Not applicable for CONNECT
     }
 
-    // You might add toString() for logging purposes
     @Override
     public String toString() {
         if (type == RequestType.HTTP) {

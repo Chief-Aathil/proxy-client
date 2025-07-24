@@ -1,6 +1,7 @@
 package com.proxy.client.server;
 
 import com.proxy.client.enums.RequestType;
+import com.proxy.client.protocol.ProxyProtocolConstants;
 import com.proxy.client.task.ProxyRequestTask;
 import com.proxy.client.utils.ByteStreamUtils;
 import jakarta.annotation.PostConstruct;
@@ -10,8 +11,14 @@ import org.springframework.stereotype.Service;
 
 import java.io.*;
 import java.net.Socket;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.BlockingQueue;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
 @RequiredArgsConstructor
 @Service
 public class ServerConnMngr {
@@ -23,6 +30,12 @@ public class ServerConnMngr {
 
     private final String PROXY_SERVER_HOST = "localhost";
     private final int PROXY_SERVER_PORT = 9000; // Proxy-server's custom listener port
+    // Regex to extract Host and Port from HTTP request line or Host header
+    // Group 1: Hostname, Group 2: Port (optional)
+    private static final Pattern HOST_PATTERN = Pattern.compile("Host:\\s*([^:\\s]+)(?::(\\d+))?");
+    // Regex to find URL in request line (e.g., GET http://host:port/path HTTP/1.1)
+    public static final Pattern URL_PATTERN = Pattern.compile("^(GET|POST|PUT|DELETE|HEAD|OPTIONS)\\s+(https?://[^/\\s]+)(.*)HTTP/1\\.[01]$");
+
 
     private volatile boolean running = true;
 
@@ -37,14 +50,10 @@ public class ServerConnMngr {
         while (running) {
             ProxyRequestTask task = null;
             try {
-                // 1. Take a task from the queue (blocks if queue is empty)
+                // Take a task from the queue (blocks if queue is empty)
                 task = requestQueue.take();
                 System.out.println("Taken task from queue: " + task);
-
-                // 2. Ensure connection to proxy-server is active
                 ensureOffshoreConnection();
-
-                // 3. Process the task based on its type
                 if (task.type == RequestType.HTTP) {
                     processHttpRequestTask(task);
                 } else if (task.type == RequestType.CONNECT) {
@@ -90,37 +99,159 @@ public class ServerConnMngr {
     }
 
     private void processHttpRequestTask(ProxyRequestTask task) throws IOException {
-        // --- Phase 1.2.3: Simple Forwarding and Fixed Response ---
-        // For this phase, we are simply echoing the client's raw request
-        // and expecting a fixed string response from the proxy-server.
+        String rawRequestString = new String(task.rawHttpRequestBytes, StandardCharsets.UTF_8);
+        System.out.println("ServerConnMgr: Processing HTTP request. First line: " + rawRequestString.split("\n")[0].trim());
 
-        // Send the client's request bytes to the proxy-server as-is
-        System.out.println("ServerConnMgr: Forwarding " + task.rawHttpRequestBytes.length + " bytes to proxy-server (as plain bytes).");
-        proxyServerOut.write(task.rawHttpRequestBytes);
-        proxyServerOut.flush();
-        System.out.println("ServerConnMgr: Bytes sent to proxy-server.");
+        // Phase 2: Extract Host and Port for dynamic routing
+        Optional<String> hostAndPort = extractHostAndPort(rawRequestString);
 
-        // Read the fixed response from the proxy-server (e.g., "Hello from Proxy-Server!")
-        // Assuming the response is small and fits into a buffer
-        byte[] serverResponseBuffer = new byte[1024];
-        int bytesRead = proxyServerIn.read(serverResponseBuffer); // Blocks until data/EOF/timeout
+        if (hostAndPort.isEmpty()) {
+            System.err.println("ServerConnMgr: Could not extract Host and Port from request. Sending 400 Bad Request.");
+            task.httpResponseFuture.completeExceptionally(new IllegalArgumentException("Missing or malformed Host header."));
+            return;
+        }
 
-        if (bytesRead != -1) {
-            byte[] rawHttpResponse = new byte[bytesRead];
-            System.arraycopy(serverResponseBuffer, 0, rawHttpResponse, 0, bytesRead);
-            String serverResponseMessage = new String(rawHttpResponse, StandardCharsets.UTF_8).trim();
-            System.out.println("ServerConnMgr: Received response from proxy-server: '" + serverResponseMessage + "'");
+        String targetHost = hostAndPort.get().split(":")[0];
+        int targetPort = (hostAndPort.get().contains(":")) ?
+                Integer.parseInt(hostAndPort.get().split(":")[1]) : 80; // Default HTTP port
 
-            // Complete the CompletableFuture, unblocking the ClientConnectionHandler
-            task.httpResponseFuture.complete(rawHttpResponse);
-            System.out.println("ServerConnMgr: Completed future for task.");
+        System.out.println("ServerConnMgr: Target Host: " + targetHost + ", Target Port: " + targetPort);
+        sendConnectRequestToServer(targetHost, targetPort);
+        System.out.println("ServerConnMgr: Sent CONNECT request to Proxy-Server for " + targetHost + ":" + targetPort);
 
+        // --- Read CONNECT Response from Proxy-Server ---
+        // We expect a CONNECT_SUCCESS (0x10) or CONNECT_FAILED (0x11) response
+        int responseType = proxyServerIn.read();
+        if (responseType == -1) {
+            throw new IOException("Proxy-Server closed connection unexpectedly while waiting for CONNECT response.");
+        }
+        if (responseType == ProxyProtocolConstants.MSG_TYPE_CONNECT_SUCCESS) {
+            System.out.println("ServerConnMgr: Proxy-Server reported CONNECT SUCCESS for " + targetHost + ":" + targetPort);
+            // Tunnel established. Now, we send the original HTTP request (0x01) through the tunnel.
+
+            // --- Send Original HTTP Request (0x01) to Proxy-Server (through the tunnel) ---
+            sendOriginalHttpRequest(task);
+            System.out.println("ServerConnMgr: HTTP Response future completed for task: " + task);
+        } else if (responseType == ProxyProtocolConstants.MSG_TYPE_CONNECT_FAILED) {
+            handleOriginConnectFailure(task, targetHost, targetPort);
         } else {
-            System.err.println("ServerConnMgr: Proxy-server disconnected or sent no response.");
-            task.httpResponseFuture.completeExceptionally(new IOException("Proxy-server disconnected or sent no response."));
-            closeProxyServerConnection(); // Close the offshore connection as it's broken
+            throw new IOException("ServerConnMgr: Unexpected response type from Proxy-Server after CONNECT request: " + responseType);
         }
     }
+
+    private void sendConnectRequestToServer(String targetHost, int targetPort) throws IOException {
+        // --- Send CONNECT Request (0x02) to Proxy-Server ---
+        // This is the new part for dynamic routing. We ask the proxy-server to establish a tunnel.
+        proxyServerOut.write(ProxyProtocolConstants.MSG_TYPE_CONNECT_REQUEST); // Message Type: 0x02 (CONNECT Request)
+
+        // Host Length (short, 2 bytes)
+        byte[] hostBytes = targetHost.getBytes(StandardCharsets.UTF_8);
+        if (hostBytes.length > Short.MAX_VALUE) {
+            throw new IOException("Target host name too long: " + hostBytes.length + " bytes.");
+        }
+        new DataOutputStream(proxyServerOut).writeShort(hostBytes.length);
+        proxyServerOut.write(hostBytes); // Raw Host Bytes
+
+        // Port (int, 4 bytes)
+        new DataOutputStream(proxyServerOut).writeInt(targetPort);
+        proxyServerOut.flush();
+    }
+
+    private void handleOriginConnectFailure(ProxyRequestTask task, String targetHost, int targetPort) throws IOException {
+        // Read reason length (short) and reason bytes
+        short reasonLength = new DataInputStream(proxyServerIn).readShort();
+        byte[] reasonBytes = new byte[reasonLength];
+        ByteStreamUtils.readFully(proxyServerIn, reasonBytes, 0, reasonBytes.length);
+        String failureReason = new String(reasonBytes, StandardCharsets.UTF_8);
+
+        System.err.println("ServerConnMgr: Proxy-Server reported CONNECT FAILED for " + targetHost + ":" + targetPort + ". Reason: " + failureReason);
+        task.httpResponseFuture.completeExceptionally(new IOException("Proxy-Server failed to connect to origin: " + failureReason));
+    }
+
+    private void sendOriginalHttpRequest(ProxyRequestTask task) throws IOException {
+        proxyServerOut.write(ProxyProtocolConstants.MSG_TYPE_HTTP_REQUEST); // Message Type: 0x01 (HTTP Request)
+        new DataOutputStream(proxyServerOut).writeLong(task.rawHttpRequestBytes.length); // Content Length (long)
+        proxyServerOut.write(task.rawHttpRequestBytes); // Raw HTTP Request Bytes
+        proxyServerOut.flush();
+        System.out.println("ServerConnMgr: Sent original HTTP request through tunnel to Proxy-Server. Size: " + task.rawHttpRequestBytes.length);
+
+        // --- Read HTTP Response (0x12) from Proxy-Server (from origin server) ---
+        int httpResponseType = proxyServerIn.read();
+        if (httpResponseType == -1) {
+            throw new IOException("Proxy-Server closed connection unexpectedly while waiting for HTTP response.");
+        }
+        if (httpResponseType != ProxyProtocolConstants.MSG_TYPE_HTTP_RESPONSE) {
+            throw new IOException("Unexpected message type from Proxy-Server after CONNECT success: " + httpResponseType + ". Expected 0x12 (HTTP Response).");
+        }
+
+        long responseLength = ByteStreamUtils.readLong(proxyServerIn); // Read Content Length
+        byte[] rawHttpResponseBytes = new byte[(int) responseLength];
+        ByteStreamUtils.readFully(proxyServerIn, rawHttpResponseBytes, 0, rawHttpResponseBytes.length);
+
+        System.out.println("ServerConnMgr: Received HTTP response from Proxy-Server. Size: " + rawHttpResponseBytes.length);
+
+        task.httpResponseFuture.complete(rawHttpResponseBytes); // Complete the Future
+    }
+
+    /**
+     * Extracts the Host and Port from an HTTP request.
+     * Searches for the Host header. If not found, attempts to parse from the request line (e.g., GET http://host:port/...).
+     * Returns "host:port" or "host" if port is default 80.
+     */
+    private Optional<String> extractHostAndPort(String rawHttpRequest) {
+        String[] lines = rawHttpRequest.split("\r?\n"); // Split by CRLF or LF
+
+        // 1. Try to find Host header (most reliable)
+        for (String line : lines) {
+            Matcher matcher = HOST_PATTERN.matcher(line);
+            if (matcher.find()) {
+                String host = matcher.group(1);
+                String port = matcher.group(2); // Can be null
+                if (host != null && !host.isEmpty()) {
+                    if (port != null && !port.isEmpty()) {
+                        return Optional.of(host + ":" + port);
+                    } else {
+                        return Optional.of(host + ":80"); // Default to HTTP port 80 if not specified in Host header
+                    }
+                }
+            }
+        }
+
+        // 2. If Host header not found, try to parse from the Request Line (e.g., GET http://example.com/ HTTP/1.1)
+        if (lines.length > 0) {
+            String requestLine = lines[0];
+            Optional<String> host = getHostFromRequestLine(requestLine);
+            if (Objects.requireNonNull(host).isPresent()) return host;
+        }
+
+        return Optional.empty(); // Host header or URL not found
+    }
+
+    private static Optional<String> getHostFromRequestLine(String requestLine) {
+        Matcher urlMatcher = URL_PATTERN.matcher(requestLine);
+
+        if (urlMatcher.find()) {
+            String url = urlMatcher.group(2); // Group 2 is the full URL (e.g., http://example.com:8080)
+            try {
+                // Extract host and port from URL
+                URL parsedUrl = new URL(url);
+                String host = parsedUrl.getHost();
+                int port = parsedUrl.getPort(); // Returns -1 if no port specified
+
+                if (port == -1) {
+                    // Default port based on protocol
+                    return Optional.of(host + ":" + (parsedUrl.getProtocol().equalsIgnoreCase("https") ? 443 : 80));
+                } else {
+                    return Optional.of(host + ":" + port);
+                }
+            } catch (java.net.MalformedURLException e) {
+                System.err.println("ServerConnMgr: Malformed URL in request line: " + url + " - " + e.getMessage());
+            }
+        }
+        return Optional.empty();
+    }
+
+
 //    private void processHttpRequestTask(ProxyRequestTask task) throws IOException {
 //        // --- Send HTTP Request to Proxy-Server using custom framing ---
 //        // Message Type: 0x01 for HTTP Request
