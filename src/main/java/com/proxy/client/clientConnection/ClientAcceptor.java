@@ -5,10 +5,12 @@ import com.proxy.client.utils.ByteStreamUtils;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
-import java.io.*;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
@@ -17,23 +19,17 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.LinkedBlockingQueue;
 
-//@RequiredArgsConstructor
+@RequiredArgsConstructor
 @Service
 public class ClientAcceptor {
 
     private ServerSocket proxyServerSocket;
     private final int proxyPort = 8080;
-    private final int clientSocketTimeout = 5000;
+    private final int clientSocketTimeout = 10000;
     private ExecutorService clientConnectionPool; // Manages threads for incoming client connections
 
     private final BlockingQueue<ProxyRequestTask> requestQueue ;
-
-    @Autowired
-    public ClientAcceptor(BlockingQueue<ProxyRequestTask> requestQueue) {
-        this.requestQueue = requestQueue;
-    }
 
     @PostConstruct
     public void init() {
@@ -128,23 +124,54 @@ public class ClientAcceptor {
 
             try (InputStream clientIn = clientSocket.getInputStream();
                  OutputStream clientOut = clientSocket.getOutputStream()) {
-                // --- Phase 1.2.1: Simple Read and Fixed Response ---
-                // Read a few bytes from the client, just to confirm data reception
+                // --- Phase 1.2.3: Read input, create task, put on queue, wait for future ---
                 byte[] buffer = new byte[1024]; // Small buffer for initial read
                 int bytesRead = clientIn.read(buffer); // Blocks until some data or EOF
 
                 if (bytesRead != -1) {
-                    String receivedData = new String(buffer, 0, bytesRead, StandardCharsets.UTF_8);
+                    byte[] rawClientRequest = new byte[bytesRead];
+                    System.arraycopy(buffer, 0, rawClientRequest, 0, bytesRead);
+                    String receivedData = new String(rawClientRequest, StandardCharsets.UTF_8);
                     System.out.println("ClientHandler received from " + clientInfo + ": " + receivedData.trim());
 
-                    // Send a fixed "Hello from Proxy-Client!" response
-                    String response = "HTTP/1.1 200 OK\r\nContent-Length: 29\r\n\r\nHello from Proxy-Client!";
-                    clientOut.write(response.getBytes(StandardCharsets.UTF_8));
-                    clientOut.flush();
-                    System.out.println("ClientHandler sent fixed response to " + clientInfo + ".");
+                    // Create a CompletableFuture that this specific ClientHandler will wait on for its response
+                    CompletableFuture<byte[]> httpResponseFuture = new CompletableFuture<>();
+                    // Type doesn't matter much for this phase, just pass the raw bytes
+                    ProxyRequestTask task = new ProxyRequestTask(clientIn, clientOut, rawClientRequest, httpResponseFuture);
+
+                    try {
+                        // Put the task into the queue (this will block if the queue is full - applies backpressure)
+                        requestQueue.put(task);
+                        System.out.println("ClientHandler: Task added to queue for " + clientInfo + ".");
+
+                        // Wait for the response to be completed by the ServerConnMgr.
+                        // This blocks the current ClientHandler thread until the response is ready.
+                        byte[] rawHttpResponse = httpResponseFuture.get(); // Blocks here
+
+                        System.out.println("ClientHandler: Received response from ServerConnMgr for " + clientInfo + ". Sending to client.");
+
+                        // Send the response back to the client browser (should be "Hello from Proxy-Server!")
+                        clientOut.write(rawHttpResponse);
+                        clientOut.flush();
+                        System.out.println("ClientHandler: Response sent to " + clientInfo + ".");
+
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt(); // Restore interrupted status
+                        System.err.println("Client handler for " + clientInfo + " interrupted while putting/getting from queue: " + e.getMessage());
+                        sendErrorResponse(clientOut, 503, "Proxy busy or interrupted. Please try again later.");
+                    } catch (java.util.concurrent.ExecutionException e) {
+                        // This catches exceptions from httpResponseFuture.get() (e.g., if completeExceptionally was called)
+                        System.err.println("Client handler: Error processing request for " + clientInfo + " from ServerConnMgr: " + e.getCause().getMessage());
+                        sendErrorResponse(clientOut, 500, "Proxy processing error: " + e.getCause().getMessage());
+                    } catch (Exception e) { // Catch any other unexpected errors during processing or writing
+                        System.err.println("Client handler: Unhandled error for " + clientInfo + ": " + e.getMessage());
+                        e.printStackTrace();
+                        sendErrorResponse(clientOut, 500, "Proxy Internal Error.");
+                    }
                 } else {
                     System.out.println("Client " + clientInfo + " disconnected immediately.");
                 }
+
 //                // Loop for HTTP Keep-Alive connections
 //                while (!clientSocket.isClosed()) {
 //                    String requestLine = null;

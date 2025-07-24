@@ -5,12 +5,14 @@ import com.proxy.client.task.ProxyRequestTask;
 import com.proxy.client.utils.ByteStreamUtils;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
+import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
 import java.io.*;
 import java.net.Socket;
+import java.nio.charset.StandardCharsets;
 import java.util.concurrent.BlockingQueue;
-
+@RequiredArgsConstructor
 @Service
 public class ServerConnMngr {
 
@@ -19,14 +21,10 @@ public class ServerConnMngr {
     private InputStream proxyServerIn;
     private OutputStream proxyServerOut;
 
-    private final String PROXY_SERVER_HOST = "localhost"; // Or actual offshore IP
+    private final String PROXY_SERVER_HOST = "localhost";
     private final int PROXY_SERVER_PORT = 9000; // Proxy-server's custom listener port
 
     private volatile boolean running = true;
-
-    public ServerConnMngr(BlockingQueue<ProxyRequestTask> requestQueue) {
-        this.requestQueue = requestQueue;
-    }
 
     @PostConstruct
     public void init() {
@@ -92,35 +90,67 @@ public class ServerConnMngr {
     }
 
     private void processHttpRequestTask(ProxyRequestTask task) throws IOException {
-        // --- Send HTTP Request to Proxy-Server using custom framing ---
-        // Message Type: 0x01 for HTTP Request
-        proxyServerOut.write(0x01);
-        // Content Length: long (8 bytes)
-        new DataOutputStream(proxyServerOut).writeLong(task.rawHttpRequestBytes.length);
-        // Raw HTTP Request Bytes
+        // --- Phase 1.2.3: Simple Forwarding and Fixed Response ---
+        // For this phase, we are simply echoing the client's raw request
+        // and expecting a fixed string response from the proxy-server.
+
+        // Send the client's request bytes to the proxy-server as-is
+        System.out.println("ServerConnMgr: Forwarding " + task.rawHttpRequestBytes.length + " bytes to proxy-server (as plain bytes).");
         proxyServerOut.write(task.rawHttpRequestBytes);
         proxyServerOut.flush();
-        System.out.println("Sent HTTP request frame to Proxy-Server. Size: " + task.rawHttpRequestBytes.length);
+        System.out.println("ServerConnMgr: Bytes sent to proxy-server.");
 
-        // --- Read HTTP Response from Proxy-Server using custom framing ---
-        int responseType = proxyServerIn.read(); // Read Message Type
-        if (responseType == -1) {
-            throw new IOException("Proxy-Server closed connection unexpectedly while waiting for response.");
+        // Read the fixed response from the proxy-server (e.g., "Hello from Proxy-Server!")
+        // Assuming the response is small and fits into a buffer
+        byte[] serverResponseBuffer = new byte[1024];
+        int bytesRead = proxyServerIn.read(serverResponseBuffer); // Blocks until data/EOF/timeout
+
+        if (bytesRead != -1) {
+            byte[] rawHttpResponse = new byte[bytesRead];
+            System.arraycopy(serverResponseBuffer, 0, rawHttpResponse, 0, bytesRead);
+            String serverResponseMessage = new String(rawHttpResponse, StandardCharsets.UTF_8).trim();
+            System.out.println("ServerConnMgr: Received response from proxy-server: '" + serverResponseMessage + "'");
+
+            // Complete the CompletableFuture, unblocking the ClientConnectionHandler
+            task.httpResponseFuture.complete(rawHttpResponse);
+            System.out.println("ServerConnMgr: Completed future for task.");
+
+        } else {
+            System.err.println("ServerConnMgr: Proxy-server disconnected or sent no response.");
+            task.httpResponseFuture.completeExceptionally(new IOException("Proxy-server disconnected or sent no response."));
+            closeProxyServerConnection(); // Close the offshore connection as it's broken
         }
-        if (responseType != 0x01) { // Expecting HTTP Response type (can reuse 0x01 or define new one)
-            throw new IOException("Unexpected message type from Proxy-Server: " + responseType + ". Expected 0x01 (HTTP Response).");
-        }
-
-        long responseLength = ByteStreamUtils.readLong(proxyServerIn); // Read Content Length
-        byte[] rawHttpResponseBytes = new byte[(int) responseLength]; // Cast to int, assuming < 2GB response
-        ByteStreamUtils.readFully(proxyServerIn, rawHttpResponseBytes, 0, rawHttpResponseBytes.length); // Read raw response
-
-        System.out.println("Received HTTP response frame from Proxy-Server. Size: " + rawHttpResponseBytes.length);
-
-        // --- Complete the Future to unblock the ClientHandler ---
-        task.httpResponseFuture.complete(rawHttpResponseBytes);
-        System.out.println("HTTP Response future completed for task: " + task);
     }
+//    private void processHttpRequestTask(ProxyRequestTask task) throws IOException {
+//        // --- Send HTTP Request to Proxy-Server using custom framing ---
+//        // Message Type: 0x01 for HTTP Request
+//        proxyServerOut.write(0x01);
+//        // Content Length: long (8 bytes)
+//        new DataOutputStream(proxyServerOut).writeLong(task.rawHttpRequestBytes.length);
+//        // Raw HTTP Request Bytes
+//        proxyServerOut.write(task.rawHttpRequestBytes);
+//        proxyServerOut.flush();
+//        System.out.println("Sent HTTP request frame to Proxy-Server. Size: " + task.rawHttpRequestBytes.length);
+//
+//        // --- Read HTTP Response from Proxy-Server using custom framing ---
+//        int responseType = proxyServerIn.read(); // Read Message Type
+//        if (responseType == -1) {
+//            throw new IOException("Proxy-Server closed connection unexpectedly while waiting for response.");
+//        }
+//        if (responseType != 0x01) { // Expecting HTTP Response type (can reuse 0x01 or define new one)
+//            throw new IOException("Unexpected message type from Proxy-Server: " + responseType + ". Expected 0x01 (HTTP Response).");
+//        }
+//
+//        long responseLength = ByteStreamUtils.readLong(proxyServerIn); // Read Content Length
+//        byte[] rawHttpResponseBytes = new byte[(int) responseLength]; // Cast to int, assuming < 2GB response
+//        ByteStreamUtils.readFully(proxyServerIn, rawHttpResponseBytes, 0, rawHttpResponseBytes.length); // Read raw response
+//
+//        System.out.println("Received HTTP response frame from Proxy-Server. Size: " + rawHttpResponseBytes.length);
+//
+//        // --- Complete the Future to unblock the ClientHandler ---
+//        task.httpResponseFuture.complete(rawHttpResponseBytes);
+//        System.out.println("HTTP Response future completed for task: " + task);
+//    }
 
     private void closeProxyServerConnection() {
         try {
