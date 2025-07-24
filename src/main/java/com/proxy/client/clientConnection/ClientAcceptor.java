@@ -128,92 +128,108 @@ public class ClientAcceptor {
 
             try (InputStream clientIn = clientSocket.getInputStream();
                  OutputStream clientOut = clientSocket.getOutputStream()) {
+                // --- Phase 1.2.1: Simple Read and Fixed Response ---
+                // Read a few bytes from the client, just to confirm data reception
+                byte[] buffer = new byte[1024]; // Small buffer for initial read
+                int bytesRead = clientIn.read(buffer); // Blocks until some data or EOF
 
-                // Loop for HTTP Keep-Alive connections
-                while (!clientSocket.isClosed()) {
-                    String requestLine = null;
-                    try {
-                        requestLine = readRequestLine(clientIn);
-                    } catch (SocketTimeoutException ste) {
-                        System.out.println("Client idle timeout for " + clientInfo + ". Closing connection.");
-                        break; // Exit loop, close client connection due to inactivity
-                    } catch (IOException ioe) {
-                        System.out.println("Client " + clientInfo + " disconnected or I/O error during request line read: " + ioe.getMessage());
-                        break; // Client likely closed connection
-                    }
+                if (bytesRead != -1) {
+                    String receivedData = new String(buffer, 0, bytesRead, StandardCharsets.UTF_8);
+                    System.out.println("ClientHandler received from " + clientInfo + ": " + receivedData.trim());
 
-                    if (requestLine == null || requestLine.isEmpty()) {
-                        System.out.println("Client " + clientInfo + " sent empty request line or closed connection.");
-                        break; // Client closed connection or sent empty line
-                    }
-                    System.out.println("Received from " + clientInfo + ": " + requestLine);
-
-                    if (requestLine.startsWith("CONNECT ")) {
-                        // Phase 3: HTTPS CONNECT handling (detailed implementation later)
-                        System.out.println("HTTPS CONNECT request received from " + clientInfo + ". (To be implemented in Phase 3)");
-                        // For now, send a 501 Not Implemented response and close
-                        sendErrorResponse(clientOut, 501, "Not Implemented: HTTPS CONNECT Tunneling.");
-                        break; // Close connection after sending error
-                    } else {
-                        // Phase 2: HTTP GET/POST handling
-                        byte[] rawHttpRequestBytes = null;
-                        try {
-                            rawHttpRequestBytes = readFullHttpRequest(clientIn, requestLine);
-                        } catch (SocketTimeoutException ste) {
-                            System.out.println("Client idle timeout for " + clientInfo + " during request body read. Closing connection.");
-                            break;
-                        } catch (IOException ioe) {
-                            System.out.println("Client " + clientInfo + " disconnected or I/O error during full request read: " + ioe.getMessage());
-                            break;
-                        }
-
-                        if (rawHttpRequestBytes == null) {
-                            System.out.println("Failed to read full HTTP request from " + clientInfo + " or client closed.");
-                            break; // Error during reading, close connection
-                        }
-
-                        // Create a CompletableFuture that this specific ClientHandler will wait on for its response
-                        CompletableFuture<byte[]> httpResponseFuture = new CompletableFuture<>();
-                        ProxyRequestTask task = new ProxyRequestTask(clientIn, clientOut, rawHttpRequestBytes, httpResponseFuture);
-
-                        try {
-                            // Put the task into the queue (this will block if the queue is full - applies backpressure)
-                            requestQueue.put(task);
-                            System.out.println("Task added to queue for " + clientInfo + ": " + task.type);
-
-                            // Wait for the response to be completed by the ServerConnMgr.
-                            // This blocks the current ClientHandler thread until the response is ready.
-                            byte[] rawHttpResponse = httpResponseFuture.get(); // Blocks here
-
-                            System.out.println("Received response from ServerConnMgr for " + clientInfo + ". Sending to client.");
-
-                            // Send the response back to the client browser
-                            clientOut.write(rawHttpResponse);
-                            clientOut.flush();
-                            System.out.println("Response sent to " + clientInfo + ".");
-
-                            // Check if the response or original request indicated 'Connection: close'
-                            // For simplicity here, we continue the loop assuming keep-alive unless an error occurred.
-                            // A robust proxy would parse response headers for 'Connection: close'.
-
-                        } catch (InterruptedException e) {
-                            Thread.currentThread().interrupt(); // Restore interrupted status
-                            System.err.println("Client handler for " + clientInfo + " interrupted while putting/getting from queue: " + e.getMessage());
-                            sendErrorResponse(clientOut, 503, "Proxy busy or interrupted. Please try again later.");
-                            break; // Exit loop, close client connection
-                        } catch (java.util.concurrent.ExecutionException e) {
-                            // This catches exceptions from httpResponseFuture.get() (e.g., if completeExceptionally was called)
-                            System.err.println("Error processing request for " + clientInfo + " from ServerConnMgr: " + e.getCause().getMessage());
-                            sendErrorResponse(clientOut, 500, "Proxy processing error: " + e.getCause().getMessage());
-                            break; // Exit loop, close client connection
-                        } catch (Exception e) { // Catch any other unexpected errors during processing or writing
-                            System.err.println("Unhandled error for " + clientInfo + ": " + e.getMessage());
-                            e.printStackTrace();
-                            sendErrorResponse(clientOut, 500, "Proxy Internal Error.");
-                            break; // Exit loop, close client connection
-                        }
-                    }
-                } // End of while loop for keep-alive
+                    // Send a fixed "Hello from Proxy-Client!" response
+                    String response = "HTTP/1.1 200 OK\r\nContent-Length: 29\r\n\r\nHello from Proxy-Client!";
+                    clientOut.write(response.getBytes(StandardCharsets.UTF_8));
+                    clientOut.flush();
+                    System.out.println("ClientHandler sent fixed response to " + clientInfo + ".");
+                } else {
+                    System.out.println("Client " + clientInfo + " disconnected immediately.");
+                }
+//                // Loop for HTTP Keep-Alive connections
+//                while (!clientSocket.isClosed()) {
+//                    String requestLine = null;
+//                    try {
+//                        requestLine = readRequestLine(clientIn);
+//                    } catch (SocketTimeoutException ste) {
+//                        System.out.println("Client idle timeout for " + clientInfo + ". Closing connection.");
+//                        break; // Exit loop, close client connection due to inactivity
+//                    } catch (IOException ioe) {
+//                        System.out.println("Client " + clientInfo + " disconnected or I/O error during request line read: " + ioe.getMessage());
+//                        break; // Client likely closed connection
+//                    }
+//
+//                    if (requestLine == null || requestLine.isEmpty()) {
+//                        System.out.println("Client " + clientInfo + " sent empty request line or closed connection.");
+//                        break; // Client closed connection or sent empty line
+//                    }
+//                    System.out.println("Received from " + clientInfo + ": " + requestLine);
+//
+//                    if (requestLine.startsWith("CONNECT ")) {
+//                        // Phase 3: HTTPS CONNECT handling (detailed implementation later)
+//                        System.out.println("HTTPS CONNECT request received from " + clientInfo + ". (To be implemented in Phase 3)");
+//                        // For now, send a 501 Not Implemented response and close
+//                        sendErrorResponse(clientOut, 501, "Not Implemented: HTTPS CONNECT Tunneling.");
+//                        break; // Close connection after sending error
+//                    } else {
+//                        // Phase 2: HTTP GET/POST handling
+//                        byte[] rawHttpRequestBytes = null;
+//                        try {
+//                            rawHttpRequestBytes = readFullHttpRequest(clientIn, requestLine);
+//                        } catch (SocketTimeoutException ste) {
+//                            System.out.println("Client idle timeout for " + clientInfo + " during request body read. Closing connection.");
+//                            break;
+//                        } catch (IOException ioe) {
+//                            System.out.println("Client " + clientInfo + " disconnected or I/O error during full request read: " + ioe.getMessage());
+//                            break;
+//                        }
+//
+//                        if (rawHttpRequestBytes == null) {
+//                            System.out.println("Failed to read full HTTP request from " + clientInfo + " or client closed.");
+//                            break; // Error during reading, close connection
+//                        }
+//
+//                        // Create a CompletableFuture that this specific ClientHandler will wait on for its response
+//                        CompletableFuture<byte[]> httpResponseFuture = new CompletableFuture<>();
+//                        ProxyRequestTask task = new ProxyRequestTask(clientIn, clientOut, rawHttpRequestBytes, httpResponseFuture);
+//
+//                        try {
+//                            // Put the task into the queue (this will block if the queue is full - applies backpressure)
+//                            requestQueue.put(task);
+//                            System.out.println("Task added to queue for " + clientInfo + ": " + task.type);
+//
+//                            // Wait for the response to be completed by the ServerConnMgr.
+//                            // This blocks the current ClientHandler thread until the response is ready.
+//                            byte[] rawHttpResponse = httpResponseFuture.get(); // Blocks here
+//
+//                            System.out.println("Received response from ServerConnMgr for " + clientInfo + ". Sending to client.");
+//
+//                            // Send the response back to the client browser
+//                            clientOut.write(rawHttpResponse);
+//                            clientOut.flush();
+//                            System.out.println("Response sent to " + clientInfo + ".");
+//
+//                            // Check if the response or original request indicated 'Connection: close'
+//                            // For simplicity here, we continue the loop assuming keep-alive unless an error occurred.
+//                            // A robust proxy would parse response headers for 'Connection: close'.
+//
+//                        } catch (InterruptedException e) {
+//                            Thread.currentThread().interrupt(); // Restore interrupted status
+//                            System.err.println("Client handler for " + clientInfo + " interrupted while putting/getting from queue: " + e.getMessage());
+//                            sendErrorResponse(clientOut, 503, "Proxy busy or interrupted. Please try again later.");
+//                            break; // Exit loop, close client connection
+//                        } catch (java.util.concurrent.ExecutionException e) {
+//                            // This catches exceptions from httpResponseFuture.get() (e.g., if completeExceptionally was called)
+//                            System.err.println("Error processing request for " + clientInfo + " from ServerConnMgr: " + e.getCause().getMessage());
+//                            sendErrorResponse(clientOut, 500, "Proxy processing error: " + e.getCause().getMessage());
+//                            break; // Exit loop, close client connection
+//                        } catch (Exception e) { // Catch any other unexpected errors during processing or writing
+//                            System.err.println("Unhandled error for " + clientInfo + ": " + e.getMessage());
+//                            e.printStackTrace();
+//                            sendErrorResponse(clientOut, 500, "Proxy Internal Error.");
+//                            break; // Exit loop, close client connection
+//                        }
+//                    }
+//                } // End of while loop for keep-alive
             } catch (IOException e) {
                 // This typically means the client abruptly disconnected.
                 System.err.println("Client connection I/O error for " + clientInfo + ": " + e.getMessage());
