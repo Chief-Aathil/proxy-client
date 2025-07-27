@@ -1,5 +1,8 @@
 package com.proxy.client.listener;
 
+import com.proxy.client.handler.ClientRequestHandler;
+import com.proxy.client.queue.RequestQueue;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
@@ -14,8 +17,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
-@Component
 @Slf4j
+@RequiredArgsConstructor
+@Component
 public class ClientConnectionListener {
 
     @Value("${proxy.client.listen.port}")
@@ -25,6 +29,7 @@ public class ClientConnectionListener {
     private ExecutorService clientHandlerExecutor; // To manage threads for each ClientRequestHandler
     private volatile boolean running = false;
     private Future<?> listenerTask;
+    private final RequestQueue requestQueue;
 
     /**
      * Called by Spring after component initialization. Starts listening for incoming browser connections.
@@ -50,13 +55,7 @@ public class ClientConnectionListener {
                     Socket clientSocket = serverSocket.accept(); // Blocks until a new connection comes in
                     clientSocket.setTcpNoDelay(true); // Standard optimization
                     log.info("Accepted new browser connection from: {}", clientSocket.getInetAddress().getHostAddress());
-
-                    // TODO: In Phase 2, Task 2, we will create and submit a ClientRequestHandler here.
-                    // For now, we just log and immediately close to allow for continued acceptance.
-                    // This will be replaced.
-                    log.debug("Placeholder: ClientRequestHandler would be created here for socket {}", clientSocket.getInetAddress());
-                    // clientHandlerExecutor.submit(new ClientRequestHandler(clientSocket)); // Example of what will go here
-                    clientSocket.close(); // Close for now, will be removed later
+                    clientHandlerExecutor.submit(new ClientRequestHandler(clientSocket, requestQueue));
                 } catch (IOException e) {
                     if (running) { // Only log error if not intentionally shutting down
                         log.error("Error accepting client connection: {}", e.getMessage());
