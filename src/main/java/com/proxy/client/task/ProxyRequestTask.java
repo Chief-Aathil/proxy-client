@@ -17,7 +17,7 @@ import java.util.UUID;
  */
 @Getter
 @RequiredArgsConstructor
-@ToString(exclude = {"clientSocket", "responseFuture"})
+@ToString(exclude = {"clientSocket", "responseFuture", "rawRequestBytes"})
 public class ProxyRequestTask {
 
     @NonNull private final UUID requestID;
