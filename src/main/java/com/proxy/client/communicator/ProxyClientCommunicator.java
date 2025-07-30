@@ -23,6 +23,8 @@ public class ProxyClientCommunicator {
     private final BlockingQueue<FramedMessage> outgoingQueue = new LinkedBlockingQueue<>();
     // Map to correlate request IDs with CompletableFutures for responses
     private final ConcurrentHashMap<UUID, CompletableFuture<FramedMessage>> correlationMap = new ConcurrentHashMap<>();
+    // Map to store browser output streams for active HTTPS tunnels, mapped by requestID
+    private final ConcurrentHashMap<UUID, OutputStream> httpsTunnelOutputStreams = new ConcurrentHashMap<>();
 
     private DataInputStream dataInputStream;
     private DataOutputStream dataOutputStream;
@@ -57,6 +59,61 @@ public class ProxyClientCommunicator {
         log.info("ProxyClientCommunicator send and receive loops started.");
     }
 
+    /**
+     * Registers an OutputStream associated with an active HTTPS tunnel.
+     * This stream will be used to write incoming HTTPS_DATA frames to the browser.
+     */
+    public void registerHttpsTunnelOutputStream(UUID requestID, OutputStream browserOut) {
+        httpsTunnelOutputStreams.put(requestID, browserOut);
+        log.debug("Registered HTTPS tunnel output stream for ID: {}", requestID);
+    }
+
+    /**
+     * Removes the OutputStream mapping for a closed HTTPS tunnel.
+     * This prevents writing to a closed socket and cleans up resources.
+     */
+    public void removeHttpsTunnelOutputStream(UUID requestID) {
+        OutputStream removed = httpsTunnelOutputStreams.remove(requestID);
+        if (removed != null) {
+            log.debug("Removed HTTPS tunnel output stream mapping for ID: {}", requestID);
+        }
+    }
+
+    /**
+     * Dispatches received FramedMessages that are not associated with a waiting CompletableFuture.
+     * This includes continuous HTTPS_DATA frames.
+     *
+     * @param message The received FramedMessage.
+     */
+    private void dispatchReceivedMessage(FramedMessage message) {
+        switch (message.getMessageType()) {
+            case HTTPS_DATA:
+                OutputStream browserOut = httpsTunnelOutputStreams.get(message.getRequestID());
+                if (browserOut != null) {
+                    try {
+                        browserOut.write(message.getPayload());
+                        browserOut.flush();
+                        log.trace("Wrote {} bytes of HTTPS_DATA to browser for ID: {}", message.getPayload().length, message.getRequestID());
+                    } catch (IOException e) {
+                        log.warn("Failed to write HTTPS_DATA to browser for ID {}: {}. Browser socket likely closed.", message.getRequestID(), e.getMessage());
+                        // No need to explicitly remove from map here, ClientRequestHandler's cleanup will handle it.
+                    }
+                } else {
+                    log.warn("Received HTTPS_DATA for unknown or closed tunnel ID: {}", message.getRequestID());
+                }
+                break;
+            case CONTROL_TUNNEL_CLOSE:
+                // Server initiated a tunnel close (e.g., target server closed connection).
+                // Remove the mapping and let the ClientRequestHandler detect its own browser socket closure.
+                removeHttpsTunnelOutputStream(message.getRequestID());
+                log.info("Received CONTROL_TUNNEL_CLOSE from server for ID: {}", message.getRequestID());
+                break;
+            // Add other message types if needed (e.g., HEARTBEAT_PONG not linked to a request future)
+            default:
+                log.warn("Received unhandled message type {} with no waiting future for ID: {}", message.getMessageType(), message.getRequestID());
+                break;
+        }
+    }
     /**
      * Adds a FramedMessage to the outgoing queue for sending.
      * This method is non-blocking.
@@ -142,17 +199,12 @@ public class ProxyClientCommunicator {
                     FramedMessage receivedMessage = FramedMessage.fromStream(dis);
                     log.debug("Received message: {}", receivedMessage);
 
-                    // Attempt to complete a waiting future
+                    // Attempt to complete a waiting future first (for HTTP responses or CONNECT ACKs)
                     CompletableFuture<FramedMessage> future = correlationMap.remove(receivedMessage.getRequestID());
                     if (future != null) {
                         future.complete(receivedMessage);
                     } else {
-                        // This message was not explicitly awaited via sendAndAwaitResponse.
-                        // This will be important for handling server-initiated messages (like PONGs
-                        // that aren't part of a direct request-response pair) or HTTPS_DATA frames.
-                        // For Phase 1, we might just log it. For later phases, it needs dispatching.
-                        log.warn("Received message with no waiting future: {}. Type: {}", receivedMessage.getRequestID(), receivedMessage.getMessageType());
-                        // TODO: In later phases, dispatch to appropriate handler (e.g., ClientRequestHandler for HTTPS_DATA)
+                        dispatchReceivedMessage(receivedMessage);
                     }
                 }
             } catch (IOException e) {
@@ -187,9 +239,10 @@ public class ProxyClientCommunicator {
             }
         }
 
-        // Clear any pending futures
+        // Clear any pending futures and tunnel streams
         correlationMap.forEach((uuid, future) -> future.cancel(true));
         correlationMap.clear();
+        httpsTunnelOutputStreams.clear(); // Clear all registered streams
         outgoingQueue.clear();
 
         // Close streams
