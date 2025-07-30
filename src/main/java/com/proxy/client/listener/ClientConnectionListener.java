@@ -4,6 +4,7 @@ import com.proxy.client.handler.ClientRequestHandler;
 import com.proxy.client.queue.RequestQueue;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -30,6 +31,7 @@ public class ClientConnectionListener {
     private volatile boolean running = false;
     private Future<?> listenerTask;
     private final RequestQueue requestQueue;
+    private final ObjectProvider<ClientRequestHandler> clientRequestHandlerProvider;
 
     /**
      * Called by Spring after component initialization. Starts listening for incoming browser connections.
@@ -55,7 +57,8 @@ public class ClientConnectionListener {
                     Socket clientSocket = serverSocket.accept(); // Blocks until a new connection comes in
                     clientSocket.setTcpNoDelay(true); // Standard optimization
                     log.info("Accepted new browser connection from: {}", clientSocket.getInetAddress().getHostAddress());
-                    clientHandlerExecutor.submit(new ClientRequestHandler(clientSocket, requestQueue));
+                    ClientRequestHandler clientRequestHandler = clientRequestHandlerProvider.getObject(clientSocket);
+                    clientHandlerExecutor.submit(clientRequestHandler);
                 } catch (IOException e) {
                     if (running) { // Only log error if not intentionally shutting down
                         log.error("Error accepting client connection: {}", e.getMessage());
