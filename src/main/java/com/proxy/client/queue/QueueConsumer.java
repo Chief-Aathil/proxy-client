@@ -1,6 +1,7 @@
 package com.proxy.client.queue;
 
 import com.proxy.client.executor.HttpExecutor;
+import com.proxy.client.executor.HttpsExecutor;
 import com.proxy.client.task.ProxyRequestTask;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -19,7 +20,8 @@ import java.util.concurrent.TimeUnit;
 public class QueueConsumer {
 
     private final RequestQueue requestQueue;
-    private final HttpExecutor httpExecutor; // Injected, will process HTTP_REQUEST tasks
+    private final HttpExecutor httpExecutor;
+    private final HttpsExecutor httpsExecutor;
 
     private ExecutorService consumerExecutor;
     private volatile boolean running = false;
@@ -51,12 +53,10 @@ public class QueueConsumer {
                 // Dispatch task based on its type
                 switch (task.getRequestType()) {
                     case HTTP_REQUEST:
-                        httpExecutor.processHttpRequest(task); // HttpExecutor handles sending via tunnel and completing future
+                        httpExecutor.processHttpRequest(task);
                         break;
                     case HTTPS_CONNECT:
-                        // TODO: In Phase 3, this will call HttpsExecutor
-                        log.warn("HTTPS_CONNECT task received, but HttpsExecutor is not yet implemented. Task ID: {}", task.getRequestID());
-                        task.getResponseFuture().completeExceptionally(new UnsupportedOperationException("HTTPS not yet supported"));
+                        httpsExecutor.executeConnect(task);
                         break;
                     default:
                         log.error("Unknown request type received in QueueConsumer: {}. Task ID: {}", task.getRequestType(), task.getRequestID());
