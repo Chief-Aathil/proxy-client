@@ -57,7 +57,8 @@ public class ClientConnectionListener {
                     Socket clientSocket = serverSocket.accept(); // Blocks until a new connection comes in
                     clientSocket.setTcpNoDelay(true); // Standard optimization
                     log.info("Accepted new browser connection from: {}", clientSocket.getInetAddress().getHostAddress());
-                    ClientRequestHandler clientRequestHandler = clientRequestHandlerProvider.getObject(clientSocket);
+                    ClientRequestHandler clientRequestHandler = clientRequestHandlerProvider.getObject();
+                    clientRequestHandler.setClientSocket(clientSocket);
                     clientHandlerExecutor.submit(clientRequestHandler);
                 } catch (IOException e) {
                     if (running) { // Only log error if not intentionally shutting down

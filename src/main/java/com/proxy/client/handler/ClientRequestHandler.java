@@ -31,10 +31,23 @@ import java.util.regex.Pattern;
 @Component
 public class ClientRequestHandler implements Runnable {
 
-    private final Socket clientSocket;
+    private Socket clientSocket;  // Removed final to allow setting after construction
     private final RequestQueue requestQueue;
     private final ProxyClientCommunicator clientCommunicator;
     private final ObjectProvider<HttpsRequestHandler> httpsRequestHandlerProvider;
+
+    /**
+     * Sets the client socket for this handler.
+     * This is needed because the socket is not known at construction time.
+     *
+     * @param clientSocket the client socket to set
+     */
+    public void setClientSocket(Socket clientSocket) {
+        if (this.clientSocket != null) {
+            throw new IllegalStateException("Client socket is already set");
+        }
+        this.clientSocket = clientSocket;
+    }
 
     @Override
     public void run() {
@@ -58,6 +71,7 @@ public class ClientRequestHandler implements Runnable {
 
             // 2. Handle HTTP and HTTPS separately
             String requestLine = new String(rawRequestBytes, 0, Math.min(rawRequestBytes.length, 256), StandardCharsets.ISO_8859_1).split("\r\n")[0];
+            log.info("Received Line: {}, RequestID: {}", requestLine, requestID);
             if (requestLine.startsWith("CONNECT ")) {
                 HttpsRequestHandler httpsRequestHandler = httpsRequestHandlerProvider.getObject();
                 httpsRequestHandler.handleHttpsConnect(requestID, rawRequestBytes, browserIn, browserOut,clientSocket);
@@ -101,7 +115,6 @@ public class ClientRequestHandler implements Runnable {
         );
 
         requestQueue.put(task);
-        log.debug("Enqueued HTTP request with ID: {}", requestID);
 
         // Wait on CompletableFuture for the response (blocking this handler thread until response arrives or timeout)
         byte[] responseBytes = responseFuture.get(60, TimeUnit.SECONDS);
@@ -210,7 +223,6 @@ public class ClientRequestHandler implements Runnable {
             // Crucial: remove the OutputStream from ProxyClientCommunicator's map for HTTPS tunnels.
             // This prevents data being written to a closed socket or memory leaks.
             clientCommunicator.removeHttpsTunnelOutputStream(requestID);
-            log.debug("Removed HTTPS tunnel output stream mapping for ID: {}", requestID);
         }
     }
 }

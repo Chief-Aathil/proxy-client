@@ -48,7 +48,6 @@ public class QueueConsumer {
         while (running) {
             try {
                 ProxyRequestTask task = requestQueue.take(); // Blocks until a task is available
-                log.debug("QueueConsumer processing task with ID: {}", task.getRequestID());
 
                 // Dispatch task based on its type
                 switch (task.getRequestType()) {

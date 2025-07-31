@@ -46,7 +46,7 @@ public class PingTestService {
             CompletableFuture<FramedMessage> pongFuture = communicator.sendAndAwaitResponse(pingMessage);
 
             // Wait for the PONG for a short duration
-            FramedMessage pongResponse = pongFuture.get(5, TimeUnit.SECONDS); // 5-second timeout
+            FramedMessage pongResponse = pongFuture.get(10, TimeUnit.SECONDS); // 5-second timeout
 
             if (pongResponse.getMessageType() == FramedMessage.MessageType.HEARTBEAT_PONG &&
                     pongResponse.getRequestID().equals(pingId)) {
