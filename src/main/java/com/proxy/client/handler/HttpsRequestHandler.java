@@ -144,7 +144,7 @@ public class HttpsRequestHandler {
         try {
             // Ensure send is not interrupted by the same thread interruption
             clientCommunicator.send(closeMessage);
-        } catch (InterruptedException e) {
+        } catch (InterruptedException | IOException e) {
             log.error("Failed to send CONTROL_TUNNEL_CLOSE for ID {}: {}", requestID, e.getMessage());
             Thread.currentThread().interrupt();
         }

@@ -2,6 +2,7 @@ package com.proxy.client.listener;
 
 import com.proxy.client.handler.ClientRequestHandler;
 import com.proxy.client.queue.RequestQueue;
+import lombok.Getter;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ObjectProvider;
@@ -28,7 +29,7 @@ public class ClientConnectionListener {
 
     private ServerSocket serverSocket;
     private ExecutorService clientHandlerExecutor; // To manage threads for each ClientRequestHandler
-    private volatile boolean running = false;
+    @Getter private volatile boolean running = false;
     private Future<?> listenerTask;
     private final RequestQueue requestQueue;
     private final ObjectProvider<ClientRequestHandler> clientRequestHandlerProvider;
@@ -47,7 +48,7 @@ public class ClientConnectionListener {
     /**
      * Main loop to accept incoming browser connections and hand them off.
      */
-    private void startListening() {
+    public void startListening() {
         try {
             serverSocket = new ServerSocket(listenPort);
             log.info("ClientConnectionListener started, listening on port {}", listenPort);
