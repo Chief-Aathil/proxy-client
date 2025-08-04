@@ -1,16 +1,15 @@
 package com.proxy.client.queue;
 
 import com.proxy.client.task.ProxyRequestTask;
+import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
-import jakarta.annotation.PreDestroy;
 import java.io.IOException;
 import java.util.UUID;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.TimeUnit;
 
 /**
  * A central, thread-safe queue for ProxyRequestTask instances.
@@ -23,19 +22,17 @@ public class RequestQueue {
 
     // The queue for sequential processing of requests
     private final BlockingQueue<ProxyRequestTask> queue = new LinkedBlockingQueue<>();
-
     // A map to allow quick lookup and cancellation of tasks by their requestID
-    private final ConcurrentHashMap<UUID, ProxyRequestTask> activeTasks = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<UUID, ProxyRequestTask> activeTasksMap = new ConcurrentHashMap<>();
 
     /**
      * Adds a ProxyRequestTask to the queue and registers it in the activeTasks map.
      * This method is blocking if the queue is capacity-limited (though LinkedBlockingQueue is unbounded by default).
      *
-     * @param task The ProxyRequestTask to add.
      * @throws InterruptedException If the thread is interrupted while adding the task.
      */
     public void put(ProxyRequestTask task) throws InterruptedException {
-        activeTasks.put(task.getRequestID(), task);
+        activeTasksMap.put(task.getRequestID(), task);
         queue.put(task);
         log.debug("Added task with ID {} to queue. Queue size: {}", task.getRequestID(), queue.size());
     }
@@ -50,8 +47,8 @@ public class RequestQueue {
      */
     public ProxyRequestTask take() throws InterruptedException {
         ProxyRequestTask task = queue.take();
-        activeTasks.remove(task.getRequestID()); // Remove from map once taken for processing
-        log.debug("Took task with ID {} from queue. Remaining active tasks: {}", task.getRequestID(), activeTasks.size());
+        activeTasksMap.remove(task.getRequestID());
+        log.debug("Took task with ID {} from queue. Remaining active tasks: {}", task.getRequestID(), activeTasksMap.size());
         return task;
     }
 
@@ -64,7 +61,7 @@ public class RequestQueue {
      * @param requestID The UUID of the request to cancel.
      */
     public void cancelRequest(UUID requestID) {
-        ProxyRequestTask task = activeTasks.remove(requestID); // Remove from map
+        ProxyRequestTask task = activeTasksMap.remove(requestID);
         if (task != null) {
             log.warn("Attempting to cancel request with ID: {}. Completing future exceptionally.", requestID);
             task.getResponseFuture().completeExceptionally(new IOException("Request cancelled by proxy server (tunnel closed)."));
@@ -87,11 +84,11 @@ public class RequestQueue {
     public void shutdown() {
         log.info("Shutting down RequestQueue. Clearing all pending tasks.");
         // Complete any pending futures exceptionally to unblock waiting ClientRequestHandlers
-        activeTasks.forEach((id, task) -> {
+        activeTasksMap.forEach((id, task) -> {
             task.getResponseFuture().completeExceptionally(new IOException("Proxy shutting down."));
             log.warn("Failing pending request future {} due to shutdown.", id);
         });
-        activeTasks.clear();
+        activeTasksMap.clear();
         queue.clear();
         log.info("RequestQueue shutdown complete.");
     }

@@ -22,7 +22,7 @@ public class ProxyRequestTask {
 
     @NonNull private final UUID requestID;
     @NonNull private final FramedMessage.MessageType requestType; // HTTP_REQUEST or HTTPS_CONNECT
-    @NonNull private final byte[] rawRequestBytes; // Raw bytes of the HTTP request or CONNECT line
+    @NonNull private final byte[] rawRequestBytes;
     @NonNull private final Socket clientSocket; // The socket connected to the browser
     @NonNull private final CompletableFuture<byte[]> responseFuture; // Future to deliver the final response bytes
 }
