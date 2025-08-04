@@ -13,9 +13,9 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
+@Component
 @Slf4j
 @RequiredArgsConstructor
-@Component
 public class HttpsExecutor {
 
     private final ProxyClientCommunicator clientCommunicator;
@@ -35,7 +35,7 @@ public class HttpsExecutor {
 
         // This is the CompletableFuture that the HttpsRequestHandler (which called QueueConsumer, which called this executor)
         // is waiting on. It expects a byte[] (empty array for success signal).
-        CompletableFuture<byte[]> tunnelReadyFuture = (CompletableFuture<byte[]>) task.getResponseFuture();
+        CompletableFuture<byte[]> tunnelReadyFuture = task.getResponseFuture();
 
         log.debug("HttpsExecutor: Sending HTTPS_CONNECT FramedMessage for ID: {}", requestID);
         FramedMessage connectMessage = new FramedMessage(

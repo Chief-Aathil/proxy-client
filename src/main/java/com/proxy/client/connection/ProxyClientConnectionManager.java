@@ -112,7 +112,7 @@ public class ProxyClientConnectionManager {
         if (!clientConnectionListener.isRunning()) { // Prevent multiple starts if already running
             clientConnectionListener.startListening();
         }
-        connectionLostSignal.set(false); // Reset signal
+        connectionLostSignal.set(false);
     }
 
 
@@ -143,8 +143,8 @@ public class ProxyClientConnectionManager {
                 log.info("Connection loss detected. Shutting down current communicator and initiating reconnection flow.");
                 // Explicitly shut down the old communicator and close socket if any
                 cleanupDisconnectedState();
-                connectionLostSignal.set(false); // Reset signal before re-attempt
-                scheduler.submit(this::initiateConnectionFlow); // Start new connection flow
+                connectionLostSignal.set(false);
+                scheduler.submit(this::initiateConnectionFlow);
             } finally {
                 connectionLock.unlock();
             }
@@ -183,7 +183,7 @@ public class ProxyClientConnectionManager {
                                     log.warn("Heartbeat PONG failed for ID: {}. Exception: {}. Triggering connection loss.", pingMessage.getRequestID(), ex != null ? ex.getMessage() : "Unknown");
                                 }
                                 // Connection assumed lost due to heartbeat failure
-                                if (connectionLostSignal.compareAndSet(false, true)) { // Only signal once
+                                if (connectionLostSignal.compareAndSet(false, true)) {
                                     scheduler.submit(this::handleReconnectTrigger);
                                 }
                             }
@@ -194,7 +194,7 @@ public class ProxyClientConnectionManager {
             } catch (Exception e) {
                 log.error("Error during heartbeat: {}", e.getMessage(), e);
                 // Assume connection issue if heartbeat task itself throws unexpected error
-                if (connectionLostSignal.compareAndSet(false, true)) { // Only signal once
+                if (connectionLostSignal.compareAndSet(false, true)) {
                     scheduler.submit(this::handleReconnectTrigger);
                 }
             }
@@ -247,7 +247,7 @@ public class ProxyClientConnectionManager {
             Thread.currentThread().interrupt();
             log.warn("Connection manager shutdown interrupted.");
         }
-        cleanupDisconnectedState(); // Ensure communicator and socket are closed
+        cleanupDisconnectedState();
         log.info("ProxyClientConnectionManager shutdown complete.");
     }
 }
