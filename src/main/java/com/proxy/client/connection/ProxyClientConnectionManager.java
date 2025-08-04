@@ -43,10 +43,6 @@ public class ProxyClientConnectionManager {
     public void init() {
         active = true;
         scheduler.submit(this::initiateConnectionFlow);
-        // Start the browser listener after the connection flow has started
-        // It's better to start the browser listener only after a successful connection to the server
-        // But for initial development, we can keep it here.
-        // clientConnectionListener.startListening(); // Moved to be called after successful server connection
     }
 
     /**
@@ -67,34 +63,18 @@ public class ProxyClientConnectionManager {
                 if (isConnected()) { // Recheck inside lock
                     break;
                 }
-
                 attempts.incrementAndGet();
                 log.info("Attempting to connect to proxy server (attempt {}/{})...",
                         attempts.get(), (maxAttempts == 0 ? "unlimited" : maxAttempts));
-
                 try {
-                    // Try to establish the connection
-                    proxyServerClientSocket = new Socket(host, port);
-                    proxyServerClientSocket.setTcpNoDelay(true);
-                    log.info("Successfully connected to proxy server at {}:{}", host, port);
-
-                    // Initialize and start the communicator with the new socket
-                    clientCommunicator.initialize(proxyServerClientSocket, this::onConnectionLoss); // Pass callback
-                    clientCommunicator.start();
-
-                    // Connection successful, start heartbeat and browser listener
-                    startHeartbeat();
-                    if (!clientConnectionListener.isRunning()) { // Prevent multiple starts if already running
-                        clientConnectionListener.startListening();
-                    }
-                    connectionLostSignal.set(false); // Reset signal
+                    establishProxyConnection(host, port);
                     break; // Exit retry loop
                 } catch (IOException e) {
                     log.error("Failed to connect to proxy server: {}. Retrying in {} ms.", e.getMessage(), currentDelay);
                     cleanupDisconnectedState(); // Clean up if previous attempt failed
                     if (maxAttempts != 0 && attempts.get() >= maxAttempts) {
                         log.error("Maximum connection attempts reached ({}). Giving up.", maxAttempts);
-                        active = false; // Stop trying if max attempts hit for initial connection
+                        active = false;
                         break;
                     }
                     try {
@@ -115,6 +95,24 @@ public class ProxyClientConnectionManager {
         if (!active) {
             log.error("Connection manager has stopped trying to connect to the proxy server.");
         }
+    }
+
+    private void establishProxyConnection(String host, int port) throws IOException {
+        // Try to establish the connection
+        proxyServerClientSocket = new Socket(host, port);
+        proxyServerClientSocket.setTcpNoDelay(true);
+        log.info("Successfully connected to proxy server at {}:{}", host, port);
+
+        // Initialize and start the communicator with the new socket
+        clientCommunicator.initialize(proxyServerClientSocket, this::onConnectionLoss);
+        clientCommunicator.start();
+
+        // Connection successful, start heartbeat and browser listener
+        startHeartbeat();
+        if (!clientConnectionListener.isRunning()) { // Prevent multiple starts if already running
+            clientConnectionListener.startListening();
+        }
+        connectionLostSignal.set(false); // Reset signal
     }
 
 
@@ -228,7 +226,7 @@ public class ProxyClientConnectionManager {
             } catch (IOException e) {
                 log.error("Error closing proxy server client socket: {}", e.getMessage());
             } finally {
-                proxyServerClientSocket = null; // Clear reference
+                proxyServerClientSocket = null;
             }
         }
     }
@@ -239,8 +237,8 @@ public class ProxyClientConnectionManager {
     @PreDestroy
     public void shutdown() {
         log.info("Shutting down ProxyClientConnectionManager.");
-        active = false; // Stop all loops and scheduled tasks
-        scheduler.shutdownNow(); // Immediately stop scheduled tasks
+        active = false;
+        scheduler.shutdownNow();
         try {
             if (!scheduler.awaitTermination(5, TimeUnit.SECONDS)) {
                 log.warn("Scheduler did not terminate in time.");

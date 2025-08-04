@@ -1,6 +1,5 @@
 package com.proxy.client.communicator;
 
-import com.proxy.client.handler.HttpsRequestHandler;
 import com.proxy.client.queue.RequestQueue;
 import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;
@@ -27,26 +26,19 @@ import java.util.concurrent.TimeUnit;
 @RequiredArgsConstructor
 public class ProxyClientCommunicator {
 
+    private final RequestQueue requestQueue;
     // Queue for outgoing FramedMessages to be sent by the send thread
     private final BlockingQueue<FramedMessage> outgoingQueue = new LinkedBlockingQueue<>();
     // Map to correlate request IDs with CompletableFutures for responses
     private final ConcurrentHashMap<UUID, CompletableFuture<FramedMessage>> correlationMap = new ConcurrentHashMap<>();
     // Map to store browser output streams for active HTTPS tunnels, mapped by requestID
-    private final ConcurrentHashMap<UUID, OutputStream> httpsTunnelOutputStreams = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<UUID, OutputStream> httpsTunnelOutputStreamsMap = new ConcurrentHashMap<>();
 
+    private volatile boolean running = false;
     private DataInputStream dataInputStream;
     private DataOutputStream dataOutputStream;
     private ExecutorService executorService;
-    private volatile boolean running = false;
-
-    // Callback for connection loss notification - changed to Runnable
     private Runnable connectionLossCallback;
-
-    private final RequestQueue requestQueue; // For general requests to the server
-
-    // Note: HttpsExecutor & HttpExecutor are not directly injected here
-    // as they rely on this communicator instance. They will be instantiated or provided
-    // with this communicator at a higher level (e.g., ClientRequestHandler or its factories)
 
     /**
      * Initializes the communicator with the socket to the offshore proxy server.
@@ -55,7 +47,7 @@ public class ProxyClientCommunicator {
      * @param proxyServerClientSocket The connected socket to the offshore proxy server.
      * @param connectionLossCallback A callback to be invoked if the connection is lost.
      */
-    public void initialize(Socket proxyServerClientSocket, Runnable connectionLossCallback) throws IOException { // Changed to Runnable
+    public void initialize(Socket proxyServerClientSocket, Runnable connectionLossCallback) throws IOException {
         this.dataInputStream = new DataInputStream(proxyServerClientSocket.getInputStream());
         this.dataOutputStream = new DataOutputStream(proxyServerClientSocket.getOutputStream());
         this.executorService = Executors.newFixedThreadPool(2); // One for sending, one for receiving
@@ -87,10 +79,9 @@ public class ProxyClientCommunicator {
     public void send(FramedMessage message) throws InterruptedException, IOException {
         if (!running) {
             log.warn("Communicator is not running. Message not sent: {}", message);
-            // If connection lost, throw an exception for the caller to handle
-            throw new IOException("Communicator not running, connection likely lost."); // Or a custom exception
+            throw new IOException("Communicator not running, connection likely lost.");
         }
-        outgoingQueue.put(message); // Blocking put if queue is full (unlikely for LinkedBlockingQueue)
+        outgoingQueue.put(message); // Blocking if queue is full
         log.debug("Added message to outgoing queue: {}", message);
     }
 
@@ -99,8 +90,6 @@ public class ProxyClientCommunicator {
      * when a response with the matching requestID is received.
      * This is used for HTTP responses and CONTROL_200_OK for HTTPS CONNECT.
      *
-     * @param requestMessage The FramedMessage to send.
-     * @return A CompletableFuture that will hold the response FramedMessage.
      * @throws InterruptedException If the thread is interrupted while sending the message.
      * @throws IOException If the communicator is not running.
      */
@@ -110,9 +99,9 @@ public class ProxyClientCommunicator {
         try {
             send(requestMessage);
         } catch (IOException e) {
-            correlationMap.remove(requestMessage.getRequestID()); // Clean up if send fails
-            future.completeExceptionally(e); // Propagate send failure to future
-            throw e; // Re-throw for immediate caller handling
+            correlationMap.remove(requestMessage.getRequestID());
+            future.completeExceptionally(e);
+            throw e;
         }
         return future;
     }
@@ -125,7 +114,7 @@ public class ProxyClientCommunicator {
      * @param outputStream The OutputStream associated with the browser connection.
      */
     public void registerHttpsTunnelOutputStream(UUID requestID, OutputStream outputStream) {
-        httpsTunnelOutputStreams.put(requestID, outputStream);
+        httpsTunnelOutputStreamsMap.put(requestID, outputStream);
         log.debug("Registered HTTPS tunnel output stream for ID: {}", requestID);
     }
 
@@ -135,18 +124,8 @@ public class ProxyClientCommunicator {
      * @param requestID The unique ID of the HTTPS tunnel.
      */
     public void removeHttpsTunnelOutputStream(UUID requestID) {
-        httpsTunnelOutputStreams.remove(requestID);
+        httpsTunnelOutputStreamsMap.remove(requestID);
         log.debug("Removed HTTPS tunnel output stream for ID: {}", requestID);
-    }
-
-    /**
-     * Returns the registered OutputStream for an HTTPS tunnel.
-     *
-     * @param requestID The unique ID of the HTTPS tunnel.
-     * @return The OutputStream, or null if not found.
-     */
-    public OutputStream getHttpsTunnelOutputStream(UUID requestID) {
-        return httpsTunnelOutputStreams.get(requestID);
     }
 
     /**
@@ -169,11 +148,11 @@ public class ProxyClientCommunicator {
                 running = false;
             } catch (IOException e) {
                 log.error("Error sending message: {}. Connection to proxy server lost. Shutting down send loop.", e.getMessage());
-                handleConnectionLoss(); // Notify connection manager
-                running = false; // Signal to stop loops
+                handleConnectionLoss();
+                running = false;
             } catch (Exception e) {
                 log.error("Unexpected error in client send loop: {}", e.getMessage(), e);
-                handleConnectionLoss(); // Notify connection manager
+                handleConnectionLoss();
             }
         }
         log.info("Client send loop stopped.");
@@ -191,7 +170,7 @@ public class ProxyClientCommunicator {
                 int frameLength = dataInputStream.readInt();
                 if (frameLength < 0) {
                     log.error("Received invalid frame length: {}. Connection to proxy server corrupted. Shutting down receive loop.", frameLength);
-                    handleConnectionLoss(); // Notify connection manager
+                    handleConnectionLoss();
                     running = false;
                     break;
                 }
@@ -205,16 +184,15 @@ public class ProxyClientCommunicator {
                     FramedMessage receivedMessage = FramedMessage.fromStream(dis);
                     log.debug("Received message: {}", receivedMessage);
 
-                    // Dispatch the received message based on its type and request ID
                     dispatchReceivedMessage(receivedMessage);
                 }
             } catch (IOException e) {
                 log.error("Error receiving message: {}. Connection to proxy server lost. Shutting down receive loop.", e.getMessage());
-                handleConnectionLoss(); // Notify connection manager
-                running = false; // Signal to stop loops
+                handleConnectionLoss();
+                running = false;
             } catch (Exception e) {
                 log.error("Unexpected error in client receive loop: {}", e.getMessage(), e);
-                handleConnectionLoss(); // Notify connection manager
+                handleConnectionLoss();
             }
         }
         log.info("Client receive loop stopped.");
@@ -250,7 +228,7 @@ public class ProxyClientCommunicator {
         // When server signals tunnel close, remove the browser OutputStream.
         // The corresponding ClientRequestHandler/HttpsRequestHandler should already be closing
         // the browser socket due to its own lifecycle or this signal.
-        OutputStream closedBrowserOut = httpsTunnelOutputStreams.remove(message.getRequestID());
+        OutputStream closedBrowserOut = httpsTunnelOutputStreamsMap.remove(message.getRequestID());
         if (closedBrowserOut != null) {
             try {
                 // Attempt to close the stream if it's still open and we manage it directly here
@@ -268,7 +246,7 @@ public class ProxyClientCommunicator {
 
     private void dispatchHttpsData(FramedMessage message) {
         // If it's HTTPS_DATA, write directly to the browser's OutputStream
-        OutputStream browserOut = httpsTunnelOutputStreams.get(message.getRequestID());
+        OutputStream browserOut = httpsTunnelOutputStreamsMap.get(message.getRequestID());
         if (browserOut != null) {
             try {
                 browserOut.write(message.getPayload());
@@ -283,7 +261,7 @@ public class ProxyClientCommunicator {
                     Thread.currentThread().interrupt();
                     log.error("Error sending CONTROL_TUNNEL_CLOSE after browser write failure for ID {}: {}", message.getRequestID(), sendEx.getMessage());
                 } finally {
-                    httpsTunnelOutputStreams.remove(message.getRequestID()); // Clean up local map
+                    httpsTunnelOutputStreamsMap.remove(message.getRequestID()); // Clean up local map
                 }
             }
         } else {
@@ -317,7 +295,7 @@ public class ProxyClientCommunicator {
             correlationMap.clear();
 
             // Clear all HTTPS tunnel output streams. The HttpsRequestHandler should detect write failures.
-            httpsTunnelOutputStreams.clear(); // This helps in preventing writes to dead streams
+            httpsTunnelOutputStreamsMap.clear(); // This helps in preventing writes to dead streams
             log.warn("Cleared all active HTTPS tunnel output streams due to connection loss.");
         }
     }
@@ -354,7 +332,7 @@ public class ProxyClientCommunicator {
         // Clear any pending futures and tunnel streams
         correlationMap.forEach((uuid, future) -> future.cancel(true));
         correlationMap.clear();
-        httpsTunnelOutputStreams.clear(); // Clear all registered streams
+        httpsTunnelOutputStreamsMap.clear(); // Clear all registered streams
         outgoingQueue.clear();
 
         // Close streams
