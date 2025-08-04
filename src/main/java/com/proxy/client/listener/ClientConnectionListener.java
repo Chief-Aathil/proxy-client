@@ -2,6 +2,8 @@ package com.proxy.client.listener;
 
 import com.proxy.client.handler.ClientRequestHandler;
 import com.proxy.client.queue.RequestQueue;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import lombok.Getter;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -9,8 +11,6 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
-import jakarta.annotation.PostConstruct;
-import jakarta.annotation.PreDestroy;
 import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -19,20 +19,20 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
+@Component
 @Slf4j
 @RequiredArgsConstructor
-@Component
 public class ClientConnectionListener {
 
     @Value("${proxy.client.listen.port}")
     private int listenPort;
+    private final ObjectProvider<ClientRequestHandler> clientRequestHandlerProvider;
+    private final RequestQueue requestQueue;
 
     private ServerSocket serverSocket;
-    private ExecutorService clientHandlerExecutor; // To manage threads for each ClientRequestHandler
+    private ExecutorService clientHandlerExecutor;
     @Getter private volatile boolean running = false;
     private Future<?> listenerTask;
-    private final RequestQueue requestQueue;
-    private final ObjectProvider<ClientRequestHandler> clientRequestHandlerProvider;
 
     /**
      * Called by Spring after component initialization. Starts listening for incoming browser connections.
@@ -73,7 +73,7 @@ public class ClientConnectionListener {
             }
         } catch (IOException e) {
             log.error("Could not start ClientConnectionListener on port {}: {}", listenPort, e.getMessage());
-            running = false; // Mark as not running if startup fails
+            running = false;
         } finally {
             if (serverSocket != null && !serverSocket.isClosed()) {
                 try {
@@ -92,7 +92,7 @@ public class ClientConnectionListener {
     @PreDestroy
     public void shutdown() {
         log.info("Shutting down ClientConnectionListener.");
-        running = false; // Signal the listening loop to stop
+        running = false;
 
         // Interrupt the listener thread if it's currently blocking on accept()
         if (listenerTask != null && !listenerTask.isDone()) {
