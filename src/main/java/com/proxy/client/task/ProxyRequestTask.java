@@ -1,48 +1,28 @@
 package com.proxy.client.task;
 
-import com.proxy.client.enums.RequestType;
+import com.proxy.client.communicator.FramedMessage; // To use MessageType enum
 import lombok.Getter;
+import lombok.NonNull;
+import lombok.RequiredArgsConstructor;
+import lombok.ToString;
 
-import java.io.InputStream;
-import java.io.OutputStream;
+import java.net.Socket;
 import java.util.concurrent.CompletableFuture;
+import java.util.UUID;
 
+/**
+ * Represents a single request received from a browser/client, to be processed sequentially.
+ * This task holds the raw request data, the client's socket, and a future
+ * to deliver the response back to the originating ClientRequestHandler.
+ */
 @Getter
+@RequiredArgsConstructor
+@ToString(exclude = {"clientSocket", "responseFuture", "rawRequestBytes"})
 public class ProxyRequestTask {
 
-    public final RequestType type;
-    public final InputStream clientInputStream;
-    public final OutputStream clientOutputStream;
-    public final byte[] rawHttpRequestBytes;
-    public final String connectTargetHostPort;
-    public final CompletableFuture<byte[]> httpResponseFuture;
-
-    public ProxyRequestTask(InputStream clientIn, OutputStream clientOut, byte[] rawHttpRequestBytes, CompletableFuture<byte[]> httpResponseFuture) {
-        this.type = RequestType.HTTP;
-        this.clientInputStream = clientIn;
-        this.clientOutputStream = clientOut;
-        this.rawHttpRequestBytes = rawHttpRequestBytes;
-        this.httpResponseFuture = httpResponseFuture;
-        this.connectTargetHostPort = null; // Not applicable for HTTP
-    }
-
-    // Constructor for CONNECT requests (will be used in Phase 3)
-    public ProxyRequestTask(InputStream clientIn, OutputStream clientOut, String connectTargetHostPort, CompletableFuture<byte[]> httpResponseFuture) {
-        this.type = RequestType.CONNECT;
-        this.clientInputStream = clientIn;
-        this.clientOutputStream = clientOut;
-        this.connectTargetHostPort = connectTargetHostPort;
-        this.httpResponseFuture = httpResponseFuture; // Can be used to signal "connection established" with a null byte array
-        this.rawHttpRequestBytes = null; // Not applicable for CONNECT
-    }
-
-    @Override
-    public String toString() {
-        if (type == RequestType.HTTP) {
-            String requestPreview = rawHttpRequestBytes != null ? new String(rawHttpRequestBytes, 0, Math.min(rawHttpRequestBytes.length, 100)) : "N/A";
-            return "ProxyRequestTask{type=HTTP, client=" + clientInputStream + ", requestPreview='" + requestPreview.replace('\n', ' ').replace('\r', ' ').trim() + "'}";
-        } else {
-            return "ProxyRequestTask{type=CONNECT, client=" + clientInputStream + ", target='" + connectTargetHostPort + "'}";
-        }
-    }
+    @NonNull private final UUID requestID;
+    @NonNull private final FramedMessage.MessageType requestType; // HTTP_REQUEST or HTTPS_CONNECT
+    @NonNull private final byte[] rawRequestBytes;
+    @NonNull private final Socket clientSocket; // The socket connected to the browser
+    @NonNull private final CompletableFuture<byte[]> responseFuture; // Future to deliver the final response bytes
 }
